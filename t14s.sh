@@ -336,14 +336,22 @@ partition_disk() {
     
     # Unmount any existing partitions
     umount "${TARGET_DISK}"* 2>/dev/null || true
+    swapoff "${TARGET_DISK}"* 2>/dev/null || true
     
     # Close any existing LUKS devices
     cryptsetup close main 2>/dev/null || true
     
-    # Wipe filesystem signatures
-    wipefs -af "$TARGET_DISK"
+    # Stop any LVM volumes that might be using the disk
+    vgchange -an 2>/dev/null || true
     
-    # Create GPT partition table and partitions
+    # Wipe filesystem signatures and partition table
+    print_status "Completely wiping disk..."
+    wipefs -af "$TARGET_DISK"
+    sgdisk --zap-all "$TARGET_DISK"
+    dd if=/dev/zero of="$TARGET_DISK" bs=1M count=100 2>/dev/null || true
+    
+    # Create fresh GPT partition table and partitions
+    print_status "Creating new partition table..."
     if ! sgdisk -Z "$TARGET_DISK"; then
         print_error "Failed to create new partition table"
         exit 1
@@ -392,11 +400,20 @@ setup_encryption_and_filesystems() {
     
     print_status "Setting up LUKS encryption on $MAIN_PARTITION..."
     
+    # Close any existing LUKS devices on this partition
+    cryptsetup close main 2>/dev/null || true
+    
+    # Wipe any existing LUKS signatures
+    print_status "Wiping existing filesystem signatures..."
+    wipefs -af "$MAIN_PARTITION"
+    dd if=/dev/zero of="$MAIN_PARTITION" bs=1M count=10 2>/dev/null || true
+    
     # Setup LUKS encryption with retry mechanism
     local max_attempts=3
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
+        print_status "Creating LUKS encryption (attempt $attempt/$max_attempts)..."
         if echo -n "$ENCRYPTION_PASSWORD" | cryptsetup luksFormat "$MAIN_PARTITION" --type luks2 --pbkdf pbkdf2 -; then
             print_status "LUKS encryption setup successful"
             break
