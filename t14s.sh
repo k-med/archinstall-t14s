@@ -265,6 +265,10 @@ fi
 # Initramfs
 sed -i 's/^MODULES=()/MODULES=(btrfs)/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=(.*)/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)/' /etc/mkinitcpio.conf
+
+# Remove any archiso configurations that might interfere
+rm -f /etc/mkinitcpio.conf.d/archiso.conf 2>/dev/null || true
+
 mkinitcpio -p linux
 
 # GRUB installation
