@@ -212,7 +212,10 @@ export CHROOT_ROOT_PARTITION="$ROOT_PARTITION"
 
 # Configure in chroot
 log "Configuring system..."
-arch-chroot /mnt /bin/bash << 'CHROOT_END'
+
+# Create configuration script to avoid heredoc issues
+cat > /mnt/configure_chroot.sh << 'EOF'
+#!/bin/bash
 set -e
 
 # Get variables from environment
@@ -290,7 +293,16 @@ systemctl enable NetworkManager sshd firewalld reflector.timer fstrim.timer
 unset CHROOT_USER_PASSWORD CHROOT_USERNAME CHROOT_HOSTNAME CHROOT_ROOT_PARTITION
 
 echo "System configuration complete!"
-CHROOT_END
+EOF
+
+# Make the script executable
+chmod +x /mnt/configure_chroot.sh
+
+# Execute configuration in chroot
+arch-chroot /mnt ./configure_chroot.sh
+
+# Clean up the configuration script
+rm /mnt/configure_chroot.sh
 
 # Cleanup password variables
 unset USER_PASSWORD ENCRYPTION_PASSWORD
