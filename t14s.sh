@@ -1,151 +1,4 @@
-# Function to configure system in chroot
-configure_system() {
-    print_header "CONFIGURING SYSTEM"
-    
-    print_status "Entering chroot and configuring system..."
-    
-    # Get the correct partition name for UUID lookup
-    local main_partition
-    if [[ -b "${TARGET_DISK}p2" ]]; then
-        main_partition="${TARGET_DISK}p2"
-    elif [[ -b "${TARGET_DISK}2" ]]; then
-        main_partition="${TARGET_DISK}2"
-    else
-        print_error "Could not determine main partition name"
-        exit 1
-    fi
-    
-    # Create configuration script to run in chroot
-    cat > /mnt/configure_system.sh << EOF
 #!/bin/bash
-set -e
-
-print_status() {
-    echo -e "\033[0;32m[INFO]\033[0m \$1"
-}
-
-print_error() {
-    echo -e "\033[0;31m[ERROR]\033[0m \$1"
-}
-
-# Set timezone
-print_status "Setting timezone..."
-ln -sf /usr/share/zoneinfo/Australia/Melbourne /etc/localtime
-hwclock --systohc
-
-# Install essential packages with retry
-print_status "Installing essential packages..."
-max_attempts=3
-attempt=1
-
-packages="vim sudo base-devel btrfs-progs grub efibootmgr mtools networkmanager network-manager-applet openssh git iptables-nft ipset firewalld acpid reflector grub-btrfs amd-ucode mesa xf86-video-amdgpu man-db man-pages"
-
-while [[ \$attempt -le \$max_attempts ]]; do
-    if pacman -S --noconfirm \$packages; then
-        print_status "Packages installed successfully"
-        break
-    else
-        print_error "Package installation failed (attempt \$attempt/\$max_attempts)"
-        if [[ \$attempt -eq \$max_attempts ]]; then
-            print_error "Could not install packages after \$max_attempts attempts"
-            exit 1
-        fi
-        pacman -Sy
-        ((attempt++))
-    fi
-done
-
-# Configure locale
-print_status "Configuring locale..."
-echo "en_AU.UTF-8 UTF-8" >> /etc/locale.gen
-locale-gen
-echo "LANG=en_AU.UTF-8" > /etc/locale.conf
-echo "KEYMAP=us" > /etc/vconsole.conf
-
-# Set hostname
-print_status "Setting hostname..."
-echo "$HOSTNAME" > /etc/hostname
-
-# Configure hosts file
-cat > /etc/hosts << 'HOSTS_EOF'
-127.0.0.1   localhost
-::1         localhost
-127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
-HOSTS_EOF
-
-# Set root password
-print_status "Setting root password..."
-echo "root:$ROOT_PASSWORD" | chpasswd
-
-# Create user
-print_status "Creating user $USERNAME..."
-useradd -m -g users -G wheel "$USERNAME"
-echo "$USERNAME:$USER_PASSWORD" | chpasswd
-
-# Configure sudo
-print_status "Configuring sudo..."
-echo "$USERNAME ALL=(ALL) ALL" > /etc/sudoers.d/$USERNAME
-
-# Configure mkinitcpio for encryption
-print_status "Configuring mkinitcpio..."
-sed -i 's/^MODULES=.*/MODULES=(btrfs)/' /etc/mkinitcpio.conf
-sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)/' /etc/mkinitcpio.conf
-
-if ! mkinitcpio -p linux; then
-    print_error "Failed to generate initramfs"
-    exit 1
-fi
-
-# Install and configure GRUB
-print_status "Installing GRUB bootloader..."
-if ! grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=grub; then
-    print_error "GRUB installation failed"
-    exit 1
-fi
-
-# Get UUID for encryption
-print_status "Configuring GRUB for encryption..."
-UUID=\$(blkid -s UUID -o value $main_partition)
-if [[ -z "\$UUID" ]]; then
-    print_error "Could not get UUID for encrypted partition"
-    exit 1
-fi
-
-# Configure GRUB for encryption
-sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=\$UUID:main root=\/dev\/mapper\/main\"/" /etc/default/grub
-
-# Generate GRUB config
-print_status "Generating GRUB configuration..."
-if ! grub-mkconfig -o /boot/grub/grub.cfg; then
-    print_error "Failed to generate GRUB configuration"
-    exit 1
-fi
-
-# Enable services
-print_status "Enabling system services..."
-systemctl enable NetworkManager
-systemctl enable sshd
-systemctl enable firewalld
-systemctl enable reflector.timer
-systemctl enable fstrim.timer
-systemctl enable acpid
-
-print_status "System configuration complete!"
-EOF
-    
-    # Make script executable and run in chroot
-    chmod +x /mnt/configure_system.sh
-    
-    if ! arch-chroot /mnt /configure_system.sh; then
-        print_error "System configuration failed in chroot"
-        exit 1
-    fi
-    
-    # Clean up
-    rm /mnt/configure_system.sh
-    
-    print_status "System configuration complete!"
-}#!/bin/bash
 
 # Arch Linux Automated Installation Script
 # Based on T14s Gen 2 AMD installation notes
@@ -168,6 +21,7 @@ USER_PASSWORD=""
 ENCRYPTION_PASSWORD=""
 WIFI_SSID=""
 WIFI_PASSWORD=""
+WIFI_INTERFACE=""
 
 print_status() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -185,11 +39,6 @@ print_header() {
     echo -e "${BLUE}================================${NC}"
     echo -e "${BLUE}$1${NC}"
     echo -e "${BLUE}================================${NC}"
-}
-
-pause_for_user() {
-    echo -e "${YELLOW}Press Enter to continue...${NC}"
-    read
 }
 
 # Function to validate hostname
@@ -483,9 +332,6 @@ partition_disk() {
         fi
     done
     
-    # Extract disk name without /dev/ for use in later commands
-    DISK_NAME=$(basename "$TARGET_DISK")
-    
     print_status "Partitioning $TARGET_DISK..."
     
     # Unmount any existing partitions
@@ -736,70 +582,138 @@ configure_system() {
     
     print_status "Entering chroot and configuring system..."
     
+    # Get the correct partition name for UUID lookup
+    local main_partition
+    if [[ -b "${TARGET_DISK}p2" ]]; then
+        main_partition="${TARGET_DISK}p2"
+    elif [[ -b "${TARGET_DISK}2" ]]; then
+        main_partition="${TARGET_DISK}2"
+    else
+        print_error "Could not determine main partition name"
+        exit 1
+    fi
+    
     # Create configuration script to run in chroot
-    cat > /mnt/configure_system.sh << EOF
+    cat > /mnt/configure_system.sh << 'CHROOT_EOF'
 #!/bin/bash
 set -e
 
+print_status() {
+    echo -e "\033[0;32m[INFO]\033[0m $1"
+}
+
+print_error() {
+    echo -e "\033[0;31m[ERROR]\033[0m $1"
+}
+
 # Set timezone
+print_status "Setting timezone..."
 ln -sf /usr/share/zoneinfo/Australia/Melbourne /etc/localtime
 hwclock --systohc
 
-# Install essential packages
-pacman -S --noconfirm vim sudo base-devel btrfs-progs grub efibootmgr mtools \
-networkmanager network-manager-applet openssh git iptables-nft ipset firewalld \
-acpid reflector grub-btrfs amd-ucode mesa xf86-video-amdgpu man-db man-pages
+# Install essential packages with retry
+print_status "Installing essential packages..."
+max_attempts=3
+attempt=1
+
+packages="vim sudo base-devel btrfs-progs grub efibootmgr mtools networkmanager network-manager-applet openssh git iptables-nft ipset firewalld acpid reflector grub-btrfs amd-ucode mesa xf86-video-amdgpu man-db man-pages"
+
+while [[ $attempt -le $max_attempts ]]; do
+    if pacman -S --noconfirm $packages; then
+        print_status "Packages installed successfully"
+        break
+    else
+        print_error "Package installation failed (attempt $attempt/$max_attempts)"
+        if [[ $attempt -eq $max_attempts ]]; then
+            print_error "Could not install packages after $max_attempts attempts"
+            exit 1
+        fi
+        pacman -Sy
+        ((attempt++))
+    fi
+done
 
 # Configure locale
+print_status "Configuring locale..."
 echo "en_AU.UTF-8 UTF-8" >> /etc/locale.gen
 locale-gen
 echo "LANG=en_AU.UTF-8" > /etc/locale.conf
 echo "KEYMAP=us" > /etc/vconsole.conf
 
-# Set hostname
-echo "$HOSTNAME" > /etc/hostname
-
-# Set root password
-echo "root:$ROOT_PASSWORD" | chpasswd
-
-# Create user
-useradd -m -g users -G wheel "$USERNAME"
-echo "$USERNAME:$USER_PASSWORD" | chpasswd
-
-# Configure sudo
-echo "$USERNAME ALL=(ALL) ALL" > /etc/sudoers.d/$USERNAME
-
 # Configure mkinitcpio for encryption
+print_status "Configuring mkinitcpio..."
 sed -i 's/^MODULES=.*/MODULES=(btrfs)/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)/' /etc/mkinitcpio.conf
-mkinitcpio -p linux
+
+if ! mkinitcpio -p linux; then
+    print_error "Failed to generate initramfs"
+    exit 1
+fi
 
 # Install and configure GRUB
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=grub
+print_status "Installing GRUB bootloader..."
+if ! grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=grub; then
+    print_error "GRUB installation failed"
+    exit 1
+fi
 
-# Get UUID for encryption
-UUID=\$(blkid -s UUID -o value /dev/${TARGET_DISK}p2)
-
-# Configure GRUB for encryption
-sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=\$UUID:main root=\/dev\/mapper\/main\"/" /etc/default/grub
-
-# Generate GRUB config
-grub-mkconfig -o /boot/grub/grub.cfg
-
-# Enable services
-systemctl enable NetworkManager
-systemctl enable sshd
-systemctl enable firewalld
-systemctl enable reflector.timer
-systemctl enable fstrim.timer
-systemctl enable acpid
-
-echo "System configuration complete!"
-EOF
+print_status "System configuration complete in chroot!"
+CHROOT_EOF
     
     # Make script executable and run in chroot
     chmod +x /mnt/configure_system.sh
-    arch-chroot /mnt /configure_system.sh
+    
+    if ! arch-chroot /mnt /configure_system.sh; then
+        print_error "System configuration failed in chroot"
+        exit 1
+    fi
+    
+    # Now configure the remaining items that need variables from the host
+    print_status "Configuring system settings..."
+    
+    # Set hostname
+    echo "$HOSTNAME" > /mnt/etc/hostname
+    
+    # Configure hosts file
+    cat > /mnt/etc/hosts << EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
+EOF
+    
+    # Set passwords
+    arch-chroot /mnt bash -c "echo 'root:$ROOT_PASSWORD' | chpasswd"
+    arch-chroot /mnt useradd -m -g users -G wheel "$USERNAME"
+    arch-chroot /mnt bash -c "echo '$USERNAME:$USER_PASSWORD' | chpasswd"
+    
+    # Configure sudo
+    echo "$USERNAME ALL=(ALL) ALL" > /mnt/etc/sudoers.d/$USERNAME
+    
+    # Get UUID for encryption and configure GRUB
+    local uuid
+    uuid=$(blkid -s UUID -o value "$main_partition")
+    if [[ -z "$uuid" ]]; then
+        print_error "Could not get UUID for encrypted partition"
+        exit 1
+    fi
+    
+    # Configure GRUB for encryption
+    sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=$uuid:main root=\/dev\/mapper\/main\"/" /mnt/etc/default/grub
+    
+    # Generate GRUB config
+    if ! arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg; then
+        print_error "Failed to generate GRUB configuration"
+        exit 1
+    fi
+    
+    # Enable services
+    print_status "Enabling system services..."
+    arch-chroot /mnt systemctl enable NetworkManager
+    arch-chroot /mnt systemctl enable sshd
+    arch-chroot /mnt systemctl enable firewalld
+    arch-chroot /mnt systemctl enable reflector.timer
+    arch-chroot /mnt systemctl enable fstrim.timer
+    arch-chroot /mnt systemctl enable acpid
     
     # Clean up
     rm /mnt/configure_system.sh
