@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Arch Linux Automated Installation Script
-# Based on T14s Gen 2 AMD installation notes
+# Arch Linux Installation Script for Lenovo T14S Gen 2 AMD
+# Based on custom installation notes with BTRFS, encryption, and optimizations
 
-set -e
+set -e  # Exit on any error
 
 # Colors for output
 RED='\033[0;31m'
@@ -12,882 +12,317 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Global variables
-TARGET_DISK=""
-HOSTNAME=""
-USERNAME=""
-ROOT_PASSWORD=""
-USER_PASSWORD=""
-ENCRYPTION_PASSWORD=""
-WIFI_SSID=""
-WIFI_PASSWORD=""
-WIFI_INTERFACE=""
-
-print_status() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+# Logging function
+log() {
+    echo -e "${GREEN}[$(date +'%H:%M:%S')] $1${NC}"
 }
 
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
+warn() {
+    echo -e "${YELLOW}[WARNING] $1${NC}"
 }
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+error() {
+    echo -e "${RED}[ERROR] $1${NC}"
 }
 
-print_header() {
-    echo -e "${BLUE}================================${NC}"
-    echo -e "${BLUE}$1${NC}"
-    echo -e "${BLUE}================================${NC}"
+info() {
+    echo -e "${BLUE}[INFO] $1${NC}"
 }
 
-# Function to validate hostname
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    error "This script must be run as root (use sudo or run from root account)"
+    exit 1
+fi
+
+# Check for UEFI
+if [ ! -d "/sys/firmware/efi" ]; then
+    error "This script requires UEFI boot mode. Legacy BIOS is not supported."
+    exit 1
+fi
+
+echo -e "${BLUE}=================================${NC}"
+echo -e "${BLUE} Arch Linux Installation Script${NC}"
+echo -e "${BLUE} Lenovo T14S Gen 2 AMD Optimized${NC}"
+echo -e "${BLUE}=================================${NC}"
+echo ""
+
+# Function to get user input with validation
+get_input() {
+    local prompt="$1"
+    local var_name="$2"
+    local validation_func="$3"
+    local value
+
+    while true; do
+        echo -n -e "${YELLOW}$prompt: ${NC}"
+        read value
+        if [ -z "$validation_func" ] || $validation_func "$value"; then
+            eval "$var_name=\"$value\""
+            break
+        fi
+    done
+}
+
+# Validation functions
 validate_hostname() {
-    local hostname=$1
-    if [[ ! "$hostname" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]; then
-        return 1
-    fi
-    if [[ ${#hostname} -gt 63 ]]; then
-        return 1
-    fi
-    return 0
-}
-
-# Function to validate username
-validate_username() {
-    local username=$1
-    if [[ ! "$username" =~ ^[a-z][a-z0-9_-]{0,31}$ ]]; then
-        return 1
-    fi
-    # Check for reserved usernames
-    local reserved=("root" "bin" "daemon" "adm" "lp" "sync" "shutdown" "halt" "mail" "operator" "games" "ftp" "nobody" "systemd-network" "dbus" "polkitd" "avahi" "cups" "rtkit" "uuidd" "systemd-oom")
-    for reserved_name in "${reserved[@]}"; do
-        if [[ "$username" == "$reserved_name" ]]; then
-            return 1
-        fi
-    done
-    return 0
-}
-
-# Function to validate password strength
-validate_password() {
-    local password=$1
-    local min_length=8
-    
-    if [[ ${#password} -lt $min_length ]]; then
-        print_error "Password must be at least $min_length characters long"
-        return 1
-    fi
-    
-    # Check for at least one letter and one number
-    if [[ ! "$password" =~ [a-zA-Z] ]] || [[ ! "$password" =~ [0-9] ]]; then
-        print_warning "Password should contain both letters and numbers for better security"
-        read -p "Continue with this password anyway? (y/n): " confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            return 1
-        fi
-    fi
-    
-    return 0
-}
-
-# Function to get password with confirmation
-get_password() {
-    local prompt=$1
-    local password=""
-    local confirm=""
-    
-    while true; do
-        read -s -p "$prompt: " password
-        echo
-        
-        if [[ -z "$password" ]]; then
-            print_error "Password cannot be empty"
-            continue
-        fi
-        
-        if ! validate_password "$password"; then
-            continue
-        fi
-        
-        read -s -p "Confirm $prompt: " confirm
-        echo
-        
-        if [[ "$password" == "$confirm" ]]; then
-            echo "$password"
-            return 0
-        else
-            print_error "Passwords do not match. Please try again."
-        fi
-    done
-}
-
-# Function to get user inputs
-get_user_inputs() {
-    print_header "SYSTEM CONFIGURATION"
-    
-    # Hostname
-    while true; do
-        read -p "Enter hostname (e.g., mercury): " HOSTNAME
-        if [[ -z "$HOSTNAME" ]]; then
-            print_error "Hostname cannot be empty"
-            continue
-        fi
-        if validate_hostname "$HOSTNAME"; then
-            break
-        else
-            print_error "Invalid hostname. Use only letters, numbers, and hyphens. Max 63 characters."
-        fi
-    done
-    
-    # Username
-    while true; do
-        read -p "Enter username (lowercase, no spaces): " USERNAME
-        if [[ -z "$USERNAME" ]]; then
-            print_error "Username cannot be empty"
-            continue
-        fi
-        if validate_username "$USERNAME"; then
-            break
-        else
-            print_error "Invalid username. Must start with a letter, contain only lowercase letters, numbers, underscores, or hyphens. Max 32 characters."
-        fi
-    done
-    
-    # Passwords with confirmation
-    print_status "Setting up passwords..."
-    ROOT_PASSWORD=$(get_password "Enter root password")
-    USER_PASSWORD=$(get_password "Enter user password for $USERNAME")
-    ENCRYPTION_PASSWORD=$(get_password "Enter disk encryption password")
-    
-    # Summary
-    echo
-    print_status "Configuration Summary:"
-    echo "  Hostname: $HOSTNAME"
-    echo "  Username: $USERNAME"
-    echo "  Passwords: Set and confirmed"
-    echo
-    read -p "Is this configuration correct? (y/n): " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        print_status "Restarting configuration..."
-        HOSTNAME=""
-        USERNAME=""
-        ROOT_PASSWORD=""
-        USER_PASSWORD=""
-        ENCRYPTION_PASSWORD=""
-        get_user_inputs
-        return
-    fi
-    
-    print_status "Configuration saved!"
-}
-
-# Function to get WiFi interface
-get_wifi_interface() {
-    local interface
-    interface=$(ip link show | awk '/state UP/ {gsub(/:/, "", $2); if($2 ~ /^wl/) print $2; exit}')
-    if [[ -z "$interface" ]]; then
-        interface=$(ip link show | awk '/^[0-9]+:/ {gsub(/:/, "", $2); if($2 ~ /^wl/) print $2; exit}')
-    fi
-    if [[ -z "$interface" ]]; then
-        interface="wlan0"  # fallback
-    fi
-    echo "$interface"
-}
-
-# Function to connect to WiFi
-setup_wifi() {
-    print_header "WIFI SETUP"
-    
-    # Get WiFi interface
-    WIFI_INTERFACE=$(get_wifi_interface)
-    print_status "Using WiFi interface: $WIFI_INTERFACE"
-    
-    # Check if already connected
-    if ping -c 1 google.com &> /dev/null; then
-        print_status "Already connected to internet. Skipping WiFi setup."
+    if [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]; then
         return 0
-    fi
-    
-    local max_attempts=3
-    local attempt=1
-    
-    while [[ $attempt -le $max_attempts ]]; do
-        print_status "Scanning for networks (attempt $attempt/$max_attempts)..."
-        iwctl station "$WIFI_INTERFACE" scan
-        sleep 3
-        
-        print_status "Available WiFi networks:"
-        iwctl station "$WIFI_INTERFACE" get-networks
-        
-        read -p "Enter WiFi SSID: " WIFI_SSID
-        if [[ -z "$WIFI_SSID" ]]; then
-            print_error "SSID cannot be empty"
-            ((attempt++))
-            continue
-        fi
-        
-        read -s -p "Enter WiFi Password (leave empty for open network): " WIFI_PASSWORD
-        echo
-        
-        print_status "Connecting to WiFi network: $WIFI_SSID"
-        
-        if [[ -z "$WIFI_PASSWORD" ]]; then
-            iwctl station "$WIFI_INTERFACE" connect "$WIFI_SSID"
-        else
-            iwctl --passphrase="$WIFI_PASSWORD" station "$WIFI_INTERFACE" connect "$WIFI_SSID"
-        fi
-        
-        sleep 5
-        
-        print_status "Testing internet connection..."
-        if ping -c 3 8.8.8.8 &> /dev/null; then
-            print_status "Internet connection successful!"
-            return 0
-        else
-            print_error "Failed to connect to internet."
-            if [[ $attempt -lt $max_attempts ]]; then
-                read -p "Try again? (y/n): " retry
-                if [[ ! "$retry" =~ ^[Yy]$ ]]; then
-                    break
-                fi
-            fi
-            ((attempt++))
-        fi
-    done
-    
-    print_error "Could not establish internet connection after $max_attempts attempts."
-    read -p "Continue without internet? (Not recommended, y/n): " continue_offline
-    if [[ ! "$continue_offline" =~ ^[Yy]$ ]]; then
-        exit 1
+    else
+        error "Invalid hostname. Use only letters, numbers, and hyphens."
+        return 1
     fi
 }
 
-# Function to setup system basics
-setup_system_basics() {
-    print_header "SYSTEM BASICS SETUP"
-    
-    print_status "Setting keymap to US..."
-    loadkeys us
-    
-    print_status "Checking UEFI boot mode..."
-    if [[ ! -f /sys/firmware/efi/fw_platform_size ]]; then
-        print_error "System is not booted in UEFI mode!"
-        exit 1
+validate_username() {
+    if [[ "$1" =~ ^[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)$ ]]; then
+        return 0
+    else
+        error "Invalid username. Use lowercase letters, numbers, underscores, and hyphens."
+        return 1
     fi
-    
-    print_status "Setting timezone to Australia/Melbourne..."
-    timedatectl set-timezone Australia/Melbourne
-    timedatectl set-ntp true
-    
-    print_status "System basics configured!"
 }
 
-# Function to select and partition disk
-partition_disk() {
-    print_header "DISK PARTITIONING"
-    
+validate_disk() {
+    if [ -b "$1" ]; then
+        return 0
+    else
+        error "Disk $1 does not exist."
+        return 1
+    fi
+}
+
+# Function to securely get password with confirmation
+get_password() {
+    local prompt="$1"
+    local var_name="$2"
+    local password1
+    local password2
+
     while true; do
-        print_status "Available disks:"
-        lsblk -d -o NAME,SIZE,MODEL | grep -E "(nvme|sd[a-z]|vd[a-z])" || {
-            print_error "No suitable disks found!"
-            exit 1
-        }
-        
-        read -p "Enter target disk name (e.g., nvme0n1, sda): " TARGET_DISK
-        
-        if [[ -z "$TARGET_DISK" ]]; then
-            print_error "Disk name cannot be empty"
-            continue
-        fi
-        
-        # Add /dev/ prefix if not present
-        if [[ ! "$TARGET_DISK" =~ ^/dev/ ]]; then
-            TARGET_DISK="/dev/$TARGET_DISK"
-        fi
-        
-        # Validate disk exists
-        if [[ ! -b "$TARGET_DISK" ]]; then
-            print_error "Disk $TARGET_DISK does not exist!"
-            continue
-        fi
-        
-        # Show current partition table
-        print_status "Current partition table for $TARGET_DISK:"
-        lsblk "$TARGET_DISK" 2>/dev/null || {
-            print_warning "Could not read partition table"
-        }
-        
-        # Confirm disk selection
-        echo
-        print_warning "WARNING: This will COMPLETELY ERASE $TARGET_DISK!"
-        print_warning "All existing data will be permanently lost!"
-        echo
-        read -p "Type 'DESTROY' to confirm (case sensitive): " confirm
-        
-        if [[ "$confirm" == "DESTROY" ]]; then
-            break
-        else
-            print_error "Confirmation failed. Please try again."
-        fi
-    done
-    
-    print_status "Partitioning $TARGET_DISK..."
-    
-    # Unmount any existing partitions
-    umount "${TARGET_DISK}"* 2>/dev/null || true
-    swapoff "${TARGET_DISK}"* 2>/dev/null || true
-    
-    # Close any existing LUKS devices
-    cryptsetup close main 2>/dev/null || true
-    
-    # Stop any LVM volumes that might be using the disk
-    vgchange -an 2>/dev/null || true
-    
-    # Wipe filesystem signatures and partition table
-    print_status "Completely wiping disk..."
-    wipefs -af "$TARGET_DISK"
-    sgdisk --zap-all "$TARGET_DISK"
-    dd if=/dev/zero of="$TARGET_DISK" bs=1M count=100 2>/dev/null || true
-    
-    # Create fresh GPT partition table and partitions
-    print_status "Creating new partition table..."
-    if ! sgdisk -Z "$TARGET_DISK"; then
-        print_error "Failed to create new partition table"
-        exit 1
-    fi
-    
-    if ! sgdisk -n 1:0:+1G -t 1:ef00 -c 1:"EFI System" "$TARGET_DISK"; then
-        print_error "Failed to create EFI partition"
-        exit 1
-    fi
-    
-    if ! sgdisk -n 2:0:0 -t 2:8300 -c 2:"Linux filesystem" "$TARGET_DISK"; then
-        print_error "Failed to create main partition"
-        exit 1
-    fi
-    
-    # Wait for kernel to recognize partitions
-    sleep 2
-    partprobe "$TARGET_DISK"
-    sleep 2
-    
-    # Verify partitions were created
-    if [[ ! -b "${TARGET_DISK}p1" && ! -b "${TARGET_DISK}1" ]]; then
-        print_error "Partitions were not created successfully"
-        exit 1
-    fi
-    
-    print_status "Partitioning complete!"
-    lsblk "$TARGET_DISK"
-}
+        echo -n -e "${YELLOW}$prompt: ${NC}"
+        read -s password1
+        echo ""
+        echo -n -e "${YELLOW}Confirm $prompt: ${NC}"
+        read -s password2
+        echo ""
 
-# Function to setup encryption and filesystems
-setup_encryption_and_filesystems() {
-    print_header "ENCRYPTION AND FILESYSTEM SETUP"
-    
-    # Determine partition naming scheme
-    if [[ -b "${TARGET_DISK}p2" ]]; then
-        EFI_PARTITION="${TARGET_DISK}p1"
-        MAIN_PARTITION="${TARGET_DISK}p2"
-    elif [[ -b "${TARGET_DISK}1" ]]; then
-        EFI_PARTITION="${TARGET_DISK}1"
-        MAIN_PARTITION="${TARGET_DISK}2"
-    else
-        print_error "Could not find created partitions!"
-        exit 1
-    fi
-    
-    print_status "Setting up LUKS encryption on $MAIN_PARTITION..."
-    
-    # Close any existing LUKS devices on this partition
-    cryptsetup close main 2>/dev/null || true
-    
-    # Wipe any existing LUKS signatures
-    print_status "Wiping existing filesystem signatures..."
-    wipefs -af "$MAIN_PARTITION"
-    dd if=/dev/zero of="$MAIN_PARTITION" bs=1M count=10 2>/dev/null || true
-    
-    # Setup LUKS encryption with retry mechanism
-    local max_attempts=3
-    local attempt=1
-    
-    while [[ $attempt -le $max_attempts ]]; do
-        print_status "Creating LUKS encryption (attempt $attempt/$max_attempts)..."
-        # Use printf instead of echo -n to handle special characters better
-        if printf '%s' "$ENCRYPTION_PASSWORD" | cryptsetup luksFormat "$MAIN_PARTITION" --type luks2 -; then
-            print_status "LUKS encryption setup successful"
-            break
-        else
-            print_error "Failed to setup LUKS encryption (attempt $attempt/$max_attempts)"
-            if [[ $attempt -eq $max_attempts ]]; then
-                exit 1
-            fi
-            ((attempt++))
-            sleep 2
-        fi
-    done
-    
-    # Wait for the device to be ready
-    sleep 3
-    sync
-    
-    # Open encrypted partition with retry
-    local open_attempts=3
-    local open_attempt=1
-    
-    while [[ $open_attempt -le $open_attempts ]]; do
-        print_status "Opening encrypted partition (attempt $open_attempt/$open_attempts)..."
-        # Use printf instead of echo -n to handle special characters better
-        if printf '%s' "$ENCRYPTION_PASSWORD" | cryptsetup luksOpen "$MAIN_PARTITION" main -; then
-            print_status "Encrypted partition opened successfully"
-            break
-        else
-            print_error "Failed to open encrypted partition (attempt $open_attempt/$open_attempts)"
-            if [[ $open_attempt -eq $open_attempts ]]; then
-                print_error "Could not open encrypted partition after $open_attempts attempts"
-                print_error "Debug: Trying interactive password entry..."
-                # As a last resort, try interactive mode
-                if cryptsetup luksOpen "$MAIN_PARTITION" main; then
-                    print_status "Interactive password entry succeeded"
-                    break
-                else
-                    exit 1
+        if [ "$password1" = "$password2" ]; then
+            if [ ${#password1} -lt 8 ]; then
+                warn "Password should be at least 8 characters long for security."
+                echo -n "Continue with this password? [y/N]: "
+                read confirm
+                if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                    continue
                 fi
             fi
-            ((open_attempt++))
-            sleep 3
-        fi
-    done
-    
-    # Verify encrypted device exists
-    if [[ ! -b /dev/mapper/main ]]; then
-        print_error "Encrypted device /dev/mapper/main was not created"
-        exit 1
-    fi
-    
-    print_status "Creating Btrfs filesystem..."
-    if ! mkfs.btrfs -f /dev/mapper/main; then
-        print_error "Failed to create Btrfs filesystem"
-        exit 1
-    fi
-    
-    print_status "Creating and mounting Btrfs subvolumes..."
-    
-    # Mount temporarily to create subvolumes
-    if ! mount /dev/mapper/main /mnt; then
-        print_error "Failed to mount encrypted partition"
-        exit 1
-    fi
-    
-    cd /mnt
-    if ! btrfs subvolume create @; then
-        print_error "Failed to create @ subvolume"
-        cd /
-        umount /mnt
-        exit 1
-    fi
-    
-    if ! btrfs subvolume create @home; then
-        print_error "Failed to create @home subvolume"
-        cd /
-        umount /mnt
-        exit 1
-    fi
-    
-    cd /
-    umount /mnt
-    
-    # Mount with optimized options
-    print_status "Mounting root subvolume with optimized options..."
-    if ! mount -o noatime,ssd,compress=zstd,space_cache=v2,discard=async,subvol=@ /dev/mapper/main /mnt; then
-        print_error "Failed to mount root subvolume"
-        exit 1
-    fi
-    
-    if ! mkdir -p /mnt/home; then
-        print_error "Failed to create /mnt/home directory"
-        exit 1
-    fi
-    
-    print_status "Mounting home subvolume..."
-    if ! mount -o noatime,ssd,compress=zstd,space_cache=v2,discard=async,subvol=@home /dev/mapper/main /mnt/home; then
-        print_error "Failed to mount home subvolume"
-        exit 1
-    fi
-    
-    print_status "Setting up EFI partition..."
-    if ! mkfs.fat -F32 "$EFI_PARTITION"; then
-        print_error "Failed to format EFI partition"
-        exit 1
-    fi
-    
-    if ! mkdir -p /mnt/boot; then
-        print_error "Failed to create /mnt/boot directory"
-        exit 1
-    fi
-    
-    if ! mount "$EFI_PARTITION" /mnt/boot; then
-        print_error "Failed to mount EFI partition"
-        exit 1
-    fi
-    
-    print_status "Filesystem setup complete!"
-    print_status "Mount points:"
-    df -h /mnt /mnt/home /mnt/boot
-}
-
-# Function to update mirrorlist
-update_mirrors() {
-    print_header "UPDATING MIRRORS"
-    
-    print_status "Updating pacman mirrorlist for Australia..."
-    
-    # Backup original mirrorlist
-    cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
-    
-    # Try reflector first
-    if command -v reflector >/dev/null 2>&1; then
-        if reflector -c Australia -a 12 --sort rate --save /etc/pacman.d/mirrorlist; then
-            print_status "Mirrors updated successfully with reflector"
-            return 0
-        else
-            print_warning "Reflector failed, trying manual method..."
-        fi
-    fi
-    
-    # Fallback method if reflector fails
-    if curl -s "https://archlinux.org/mirrorlist/?country=AU&protocol=https&use_mirror_status=on" | \
-       sed -e 's/^#Server/Server/' -e '/^#/d' > /etc/pacman.d/mirrorlist; then
-        print_status "Mirrors updated successfully with manual method"
-    else
-        print_warning "Mirror update failed, using backup"
-        mv /etc/pacman.d/mirrorlist.backup /etc/pacman.d/mirrorlist
-    fi
-    
-    # Verify mirrorlist has content
-    if [[ ! -s /etc/pacman.d/mirrorlist ]]; then
-        print_error "Mirrorlist is empty! Using fallback mirrors."
-        cat > /etc/pacman.d/mirrorlist << 'EOF'
-Server = https://mirror.aarnet.edu.au/pub/archlinux/$repo/os/$arch
-Server = https://archlinux.mirror.digitalpacific.com.au/$repo/os/$arch
-Server = https://ftp.swin.edu.au/archlinux/$repo/os/$arch
-EOF
-    fi
-    
-    print_status "Mirrors configured!"
-}
-
-# Function to install base system
-install_base_system() {
-    print_header "INSTALLING BASE SYSTEM"
-    
-    print_status "Installing base packages..."
-    local max_attempts=3
-    local attempt=1
-    
-    while [[ $attempt -le $max_attempts ]]; do
-        if pacstrap /mnt base linux linux-headers linux-firmware; then
-            print_status "Base packages installed successfully"
+            eval "$var_name=\"$password1\""
             break
         else
-            print_error "Failed to install base packages (attempt $attempt/$max_attempts)"
-            if [[ $attempt -eq $max_attempts ]]; then
-                print_error "Could not install base system after $max_attempts attempts"
-                exit 1
-            fi
-            print_status "Refreshing package databases and trying again..."
-            pacman -Sy
-            ((attempt++))
+            error "Passwords do not match. Please try again."
         fi
     done
-    
-    print_status "Generating fstab..."
-    if ! genfstab -U -p /mnt >> /mnt/etc/fstab; then
-        print_error "Failed to generate fstab"
-        exit 1
-    fi
-    
-    # Verify fstab was created properly
-    if [[ ! -s /mnt/etc/fstab ]]; then
-        print_error "fstab is empty!"
-        exit 1
-    fi
-    
-    print_status "Generated fstab:"
-    cat /mnt/etc/fstab
-    
-    print_status "Base system installed!"
 }
 
-# Function to configure system in chroot
-configure_system() {
-    print_header "CONFIGURING SYSTEM"
-    
-    print_status "Entering chroot and configuring system..."
-    
-    # Get the correct partition name for UUID lookup
-    local main_partition
-    if [[ -b "${TARGET_DISK}p2" ]]; then
-        main_partition="${TARGET_DISK}p2"
-    elif [[ -b "${TARGET_DISK}2" ]]; then
-        main_partition="${TARGET_DISK}2"
-    else
-        print_error "Could not determine main partition name"
-        exit 1
-    fi
-    
-    # Create configuration script to run in chroot
-    cat > /mnt/configure_system.sh << 'CHROOT_EOF'
+# Display available disks
+log "Available disks:"
+lsblk -d -o NAME,SIZE,MODEL | grep -E "nvme|sd"
+
+echo ""
+get_input "Enter target disk (e.g., /dev/nvme0n1)" TARGET_DISK validate_disk
+get_input "Enter hostname" HOSTNAME validate_hostname
+get_input "Enter username" USERNAME validate_username
+
+get_password "Enter user password" USER_PASSWORD
+get_password "Enter disk encryption password (can be very long)" ENCRYPTION_PASSWORD
+
+# Confirm settings
+echo ""
+info "Installation Settings:"
+echo "Target Disk: $TARGET_DISK"
+echo "Hostname: $HOSTNAME"
+echo "Username: $USERNAME"
+echo ""
+warn "WARNING: This will completely wipe $TARGET_DISK!"
+echo -n "Continue? [y/N]: "
+read confirm
+if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    log "Installation cancelled."
+    exit 0
+fi
+
+# Set up time and timezone
+log "Setting up timezone and time sync..."
+timedatectl set-timezone Australia/Melbourne
+timedatectl set-ntp true
+
+# Update mirrorlist
+log "Updating mirror list for Australia/New Zealand..."
+if command -v reflector &> /dev/null; then
+    reflector -c Australia -c "New Zealand" -a 12 --sort rate --save /etc/pacman.d/mirrorlist
+else
+    warn "Reflector not available, using manual mirror setup..."
+    curl -s "https://archlinux.org/mirrorlist/?country=AU&protocol=https&use_mirror_status=on" | sed -e 's/^#Server/Server/' -e '/^#/d' > /etc/pacman.d/mirrorlist
+fi
+
+# Partition the disk
+log "Partitioning $TARGET_DISK..."
+sgdisk --zap-all $TARGET_DISK
+sgdisk --clear $TARGET_DISK
+sgdisk --new=1:0:+1G --typecode=1:ef00 --change-name=1:"EFI System" $TARGET_DISK
+sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:"Linux filesystem" $TARGET_DISK
+
+# Get partition names
+if [[ $TARGET_DISK == *"nvme"* ]]; then
+    EFI_PARTITION="${TARGET_DISK}p1"
+    ROOT_PARTITION="${TARGET_DISK}p2"
+else
+    EFI_PARTITION="${TARGET_DISK}1"
+    ROOT_PARTITION="${TARGET_DISK}2"
+fi
+
+log "EFI Partition: $EFI_PARTITION"
+log "Root Partition: $ROOT_PARTITION"
+
+# Set up encryption
+log "Setting up disk encryption..."
+echo "$ENCRYPTION_PASSWORD" | cryptsetup luksFormat --type luks2 $ROOT_PARTITION -
+echo "$ENCRYPTION_PASSWORD" | cryptsetup luksOpen $ROOT_PARTITION main -
+
+# Format filesystems
+log "Creating filesystems..."
+mkfs.fat -F32 $EFI_PARTITION
+mkfs.btrfs /dev/mapper/main
+
+# Mount and create BTRFS subvolumes
+log "Setting up BTRFS subvolumes..."
+mount /dev/mapper/main /mnt
+cd /mnt
+btrfs subvolume create @
+btrfs subvolume create @home
+cd /
+umount /mnt
+
+# Mount with optimized options
+log "Mounting filesystems with optimized options..."
+mount -o noatime,ssd,compress=zstd,space_cache=v2,discard=async,subvol=@ /dev/mapper/main /mnt
+mkdir -p /mnt/home
+mount -o noatime,ssd,compress=zstd,space_cache=v2,discard=async,subvol=@home /dev/mapper/main /mnt/home
+mkdir -p /mnt/boot
+mount $EFI_PARTITION /mnt/boot
+
+# Install base system
+log "Installing base system..."
+pacstrap /mnt base linux linux-headers linux-firmware
+
+# Generate fstab
+log "Generating fstab..."
+genfstab -U -p /mnt >> /mnt/etc/fstab
+
+# Create configuration script for chroot
+log "Creating chroot configuration script..."
+cat > /mnt/configure_system.sh << 'CHROOT_EOF'
 #!/bin/bash
-set -e
-
-print_status() {
-    echo -e "\033[0;32m[INFO]\033[0m $1"
-}
-
-print_error() {
-    echo -e "\033[0;31m[ERROR]\033[0m $1"
-}
 
 # Set timezone
-print_status "Setting timezone..."
 ln -sf /usr/share/zoneinfo/Australia/Melbourne /etc/localtime
 hwclock --systohc
 
-# Install essential packages with retry
-print_status "Installing essential packages..."
-max_attempts=3
-attempt=1
+# Install essential packages
+pacman -S --noconfirm vim sudo base-devel btrfs-progs grub efibootmgr mtools \
+    networkmanager network-manager-applet openssh git iptables-nft ipset \
+    firewalld acpid reflector grub-btrfs amd-ucode mesa xf86-video-amdgpu \
+    man-db man-pages
 
-packages="vim sudo base-devel btrfs-progs grub efibootmgr mtools networkmanager network-manager-applet openssh git iptables-nft ipset firewalld acpid reflector grub-btrfs amd-ucode mesa xf86-video-amdgpu man-db man-pages"
-
-while [[ $attempt -le $max_attempts ]]; do
-    if pacman -S --noconfirm $packages; then
-        print_status "Packages installed successfully"
-        break
-    else
-        print_error "Package installation failed (attempt $attempt/$max_attempts)"
-        if [[ $attempt -eq $max_attempts ]]; then
-            print_error "Could not install packages after $max_attempts attempts"
-            exit 1
-        fi
-        pacman -Sy
-        ((attempt++))
-    fi
-done
-
-# Configure locale
-print_status "Configuring locale..."
+# Set locale
 echo "en_AU.UTF-8 UTF-8" >> /etc/locale.gen
 locale-gen
 echo "LANG=en_AU.UTF-8" > /etc/locale.conf
 echo "KEYMAP=us" > /etc/vconsole.conf
 
-# Configure mkinitcpio for encryption
-print_status "Configuring mkinitcpio..."
-sed -i 's/^MODULES=.*/MODULES=(btrfs)/' /etc/mkinitcpio.conf
-sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)/' /etc/mkinitcpio.conf
+# Set hostname
+echo "PLACEHOLDER_HOSTNAME" > /etc/hostname
+echo "127.0.0.1 localhost" >> /etc/hosts
+echo "::1 localhost" >> /etc/hosts
+echo "127.0.1.1 PLACEHOLDER_HOSTNAME.localdomain PLACEHOLDER_HOSTNAME" >> /etc/hosts
 
-if ! mkinitcpio -p linux; then
-    print_error "Failed to generate initramfs"
-    exit 1
-fi
+# Create user
+useradd -m -g users -G wheel PLACEHOLDER_USERNAME
+echo "PLACEHOLDER_USERNAME ALL=(ALL) ALL" > /etc/sudoers.d/PLACEHOLDER_USERNAME
+
+# Configure mkinitcpio for encryption and BTRFS
+sed -i 's/^MODULES=()/MODULES=(btrfs)/' /etc/mkinitcpio.conf
+sed -i 's/^HOOKS=(.*)/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)/' /etc/mkinitcpio.conf
+mkinitcpio -p linux
 
 # Install and configure GRUB
-print_status "Installing GRUB bootloader..."
-if ! grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=grub; then
-    print_error "GRUB installation failed"
-    exit 1
-fi
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=grub
 
-print_status "System configuration complete in chroot!"
+# Configure GRUB for encryption
+ROOT_UUID=$(blkid -s UUID -o value PLACEHOLDER_ROOT_PARTITION)
+sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=$ROOT_UUID:main root=\/dev\/mapper\/main\"/" /etc/default/grub
+sed -i 's/^#GRUB_ENABLE_CRYPTODISK=y/GRUB_ENABLE_CRYPTODISK=y/' /etc/default/grub
+
+grub-mkconfig -o /boot/grub/grub.cfg
+
+# Enable services
+systemctl enable NetworkManager
+systemctl enable sshd
+systemctl enable firewalld
+systemctl enable reflector.timer
+systemctl enable fstrim.timer
+systemctl enable acpid
+
+echo "System configuration completed!"
 CHROOT_EOF
-    
-    # Make script executable and run in chroot
-    chmod +x /mnt/configure_system.sh
-    
-    if ! arch-chroot /mnt /configure_system.sh; then
-        print_error "System configuration failed in chroot"
-        exit 1
-    fi
-    
-    # Now configure the remaining items that need variables from the host
-    print_status "Configuring system settings..."
-    
-    # Set hostname
-    echo "$HOSTNAME" > /mnt/etc/hostname
-    
-    # Configure hosts file
-    cat > /mnt/etc/hosts << EOF
-127.0.0.1   localhost
-::1         localhost
-127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
-EOF
-    
-    # Set passwords
-    arch-chroot /mnt bash -c "echo 'root:$ROOT_PASSWORD' | chpasswd"
-    arch-chroot /mnt useradd -m -g users -G wheel "$USERNAME"
-    arch-chroot /mnt bash -c "echo '$USERNAME:$USER_PASSWORD' | chpasswd"
-    
-    # Configure sudo
-    echo "$USERNAME ALL=(ALL) ALL" > /mnt/etc/sudoers.d/$USERNAME
-    
-    # Get UUID for encryption and configure GRUB
-    local uuid
-    uuid=$(blkid -s UUID -o value "$main_partition")
-    if [[ -z "$uuid" ]]; then
-        print_error "Could not get UUID for encrypted partition"
-        exit 1
-    fi
-    
-    # Configure GRUB for encryption
-    sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=$uuid:main root=\/dev\/mapper\/main\"/" /mnt/etc/default/grub
-    
-    # Generate GRUB config
-    if ! arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg; then
-        print_error "Failed to generate GRUB configuration"
-        exit 1
-    fi
-    
-    # Enable services
-    print_status "Enabling system services..."
-    arch-chroot /mnt systemctl enable NetworkManager
-    arch-chroot /mnt systemctl enable sshd
-    arch-chroot /mnt systemctl enable firewalld
-    arch-chroot /mnt systemctl enable reflector.timer
-    arch-chroot /mnt systemctl enable fstrim.timer
-    arch-chroot /mnt systemctl enable acpid
-    
-    # Clean up
-    rm /mnt/configure_system.sh
-    
-    print_status "System configuration complete!"
-}
 
-# Function to complete installation
-complete_installation() {
-    print_header "INSTALLATION COMPLETE"
-    
-    print_status "Installation has been completed successfully!"
-    echo
-    echo -e "${GREEN}System Details:${NC}"
-    echo "  Hostname: $HOSTNAME"
-    echo "  Username: $USERNAME"  
-    echo "  Disk: $TARGET_DISK"
-    echo "  Filesystem: Btrfs with LUKS encryption"
-    echo "  WiFi Interface: ${WIFI_INTERFACE:-Auto-detected}"
-    echo
-    echo -e "${YELLOW}Post-Installation Notes:${NC}"
-    echo "  • After reboot, you'll need to enter your disk encryption password"
-    echo "  • Connect to WiFi with: nmcli device wifi connect \"SSID\" --ask"
-    echo "  • Update system with: sudo pacman -Syu"
-    echo "  • Install additional software as needed"
-    echo
-    
-    # Verify critical files exist before rebooting
-    local critical_files=(
-        "/mnt/boot/grub/grub.cfg"
-        "/mnt/etc/fstab"
-        "/mnt/etc/hostname"
-        "/mnt/etc/passwd"
-    )
-    
-    print_status "Performing final verification..."
-    for file in "${critical_files[@]}"; do
-        if [[ ! -f "$file" ]]; then
-            print_error "Critical file missing: $file"
-            print_error "Installation may not boot properly!"
-            read -p "Continue anyway? (y/n): " continue_anyway
-            if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
-                exit 1
-            fi
-            break
-        fi
-    done
-    
-    print_status "System verification completed successfully!"
-    echo
-    print_warning "The system will now reboot into your new Arch Linux installation."
-    
-    local reboot_choice
-    while true; do
-        read -p "Reboot now? (y/n): " reboot_choice
-        case "$reboot_choice" in
-            [Yy]|[Yy][Ee][Ss])
-                print_status "Unmounting filesystems and rebooting..."
-                sync
-                umount -R /mnt 2>/dev/null || {
-                    print_warning "Some filesystems could not be unmounted cleanly"
-                }
-                cryptsetup close main 2>/dev/null || true
-                reboot
-                break
-                ;;
-            [Nn]|[Nn][Oo])
-                print_status "Installation complete. You can manually reboot with:"
-                print_status "  sync && umount -R /mnt && cryptsetup close main && reboot"
-                break
-                ;;
-            *)
-                print_error "Please answer yes (y) or no (n)"
-                ;;
-        esac
-    done
-}
+# Replace placeholders in the chroot script
+sed -i "s/PLACEHOLDER_HOSTNAME/$HOSTNAME/g" /mnt/configure_system.sh
+sed -i "s/PLACEHOLDER_USERNAME/$USERNAME/g" /mnt/configure_system.sh
+sed -i "s|PLACEHOLDER_ROOT_PARTITION|$ROOT_PARTITION|g" /mnt/configure_system.sh
 
-# Main installation function
-main() {
-    print_header "ARCH LINUX AUTOMATED INSTALLER"
-    echo -e "${YELLOW}This script will install Arch Linux with:${NC}"
-    echo "  • LUKS full-disk encryption"
-    echo "  • Btrfs filesystem with compression"
-    echo "  • GRUB bootloader with UEFI support"
-    echo "  • AMD-optimized drivers and microcode"
-    echo "  • Essential system services"
-    echo
-    print_warning "IMPORTANT: This will completely erase the selected disk!"
-    print_warning "Make sure you have backed up any important data."
-    echo
-    
-    read -p "Do you want to continue? (y/n): " continue_install
-    if [[ ! "$continue_install" =~ ^[Yy]$ ]]; then
-        print_status "Installation cancelled by user."
-        exit 0
-    fi
-    
-    # Run installation steps
-    local steps=(
-        "get_user_inputs"
-        "setup_wifi" 
-        "setup_system_basics"
-        "partition_disk"
-        "setup_encryption_and_filesystems"
-        "update_mirrors"
-        "install_base_system"
-        "configure_system"
-        "complete_installation"
-    )
-    
-    for step in "${steps[@]}"; do
-        if ! $step; then
-            print_error "Installation step '$step' failed!"
-            exit 1
-        fi
-    done
-}
+chmod +x /mnt/configure_system.sh
 
-# Check if running as root
-if [[ $EUID -ne 0 ]]; then
-   print_error "This script must be run as root (you're already root in the Arch ISO)"
-   exit 1
+# Set passwords in chroot
+cat > /mnt/set_passwords.sh << CHROOT_PASS_EOF
+#!/bin/bash
+echo "root:$USER_PASSWORD" | chpasswd
+echo "$USERNAME:$USER_PASSWORD" | chpasswd
+CHROOT_PASS_EOF
+
+chmod +x /mnt/set_passwords.sh
+
+# Execute configuration in chroot
+log "Configuring system in chroot environment..."
+arch-chroot /mnt /configure_system.sh
+arch-chroot /mnt /set_passwords.sh
+
+# Clean up
+rm /mnt/configure_system.sh /mnt/set_passwords.sh
+
+log "Installation completed successfully!"
+log "System is ready for reboot."
+
+echo ""
+info "Installation Summary:"
+echo "- Hostname: $HOSTNAME"
+echo "- User: $USERNAME"
+echo "- Encrypted BTRFS root with optimized mount options"
+echo "- AMD-optimized drivers installed"
+echo "- Services enabled: NetworkManager, SSH, Firewall, Reflector, Trim, ACPID"
+echo ""
+warn "After reboot:"
+echo "1. Connect to WiFi: nmcli device wifi connect SSID --ask"
+echo "2. Update system: sudo pacman -Syu"
+echo "3. Install additional packages as needed"
+echo ""
+
+echo -n "Reboot now? [y/N]: "
+read reboot_confirm
+if [[ "$reboot_confirm" =~ ^[Yy]$ ]]; then
+    log "Rebooting in 3 seconds..."
+    sleep 3
+    reboot
+else
+    log "Reboot manually when ready: sudo reboot"
 fi
-
-# Check if running in Arch ISO environment
-if [[ ! -f /etc/arch-release ]]; then
-    print_error "This script should be run from an Arch Linux live environment"
-    exit 1
-fi
-
-# Run main installation
-main
