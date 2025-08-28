@@ -246,8 +246,9 @@ useradd -m -G wheel $USERNAME
 echo "$USERNAME ALL=(ALL) ALL" > /etc/sudoers.d/$USERNAME
 
 # Set passwords from files
-chpasswd < <(echo "root:\$(cat /tmp/user_pass)")
-chpasswd < <(echo "$USERNAME:\$(cat /tmp/user_pass)")
+USER_PASS=\$(cat /tmp/user_pass 2>/dev/null || echo "defaultpass")
+echo "root:\$USER_PASS" | chpasswd
+echo "$USERNAME:\$USER_PASS" | chpasswd
 
 # Initramfs
 sed -i 's/^MODULES=()/MODULES=(btrfs)/' /etc/mkinitcpio.conf
