@@ -100,7 +100,6 @@ warn "This will COMPLETELY WIPE $TARGET_DISK!"
 echo -n "Type 'YES' to continue: "
 read confirm
 if [ "$confirm" != "YES" ]; then
-    rm -f /tmp/*_pass
     exit 0
 fi
 
@@ -214,7 +213,7 @@ export CHROOT_ROOT_PARTITION="$ROOT_PARTITION"
 log "Configuring system..."
 
 # Create configuration script to avoid heredoc issues
-cat > /mnt/configure_chroot.sh << 'EOF'
+cat > /mnt/configure_chroot.sh << 'CHROOT_SCRIPT'
 #!/bin/bash
 set -e
 
@@ -224,11 +223,14 @@ USERNAME="$CHROOT_USERNAME"
 HOSTNAME="$CHROOT_HOSTNAME"
 ROOT_PARTITION="$CHROOT_ROOT_PARTITION"
 
+echo "Starting system configuration..."
+
 # Timezone
 ln -sf /usr/share/zoneinfo/Australia/Melbourne /etc/localtime
 hwclock --systohc
 
 # Packages
+echo "Installing essential packages..."
 pacman -S --noconfirm vim sudo base-devel btrfs-progs grub efibootmgr \
     networkmanager openssh git amd-ucode mesa man-db man-pages \
     firewalld reflector grub-btrfs xf86-video-amdgpu
@@ -241,13 +243,14 @@ echo "KEYMAP=us" > /etc/vconsole.conf
 
 # Network
 echo "$HOSTNAME" > /etc/hostname
-cat > /etc/hosts << EOF
+cat > /etc/hosts << HOSTS_EOF
 127.0.0.1 localhost
 ::1 localhost
 127.0.1.1 $HOSTNAME.localdomain $HOSTNAME
-EOF
+HOSTS_EOF
 
 # User setup
+echo "Creating user $USERNAME..."
 useradd -m -G wheel $USERNAME
 echo "$USERNAME ALL=(ALL) ALL" > /etc/sudoers.d/$USERNAME
 
@@ -260,26 +263,33 @@ if [ $? -eq 0 ]; then
     echo "Passwords set successfully"
 else
     echo "Error setting passwords"
+    exit 1
 fi
 
-# Initramfs
+# CRITICAL FIX: Remove any archiso configuration files that might interfere
+echo "Cleaning up archiso configs..."
+rm -f /etc/mkinitcpio.conf.d/archiso.conf 2>/dev/null || true
+rm -f /etc/mkinitcpio.d/archiso.preset 2>/dev/null || true
+
+# Initramfs - Configure hooks properly for encrypted system
+echo "Configuring mkinitcpio for encrypted system..."
 sed -i 's/^MODULES=()/MODULES=(btrfs)/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=(.*)/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)/' /etc/mkinitcpio.conf
 
-# Remove any archiso configurations that might interfere
-rm -f /etc/mkinitcpio.conf.d/archiso.conf 2>/dev/null || true
-
-mkinitcpio -p linux
+# Rebuild initramfs with the correct configuration
+echo "Rebuilding initramfs..."
+mkinitcpio -P
 
 # GRUB installation
+echo "Installing GRUB..."
 grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=grub
 
 # Get UUID and configure GRUB properly
-ROOT_UUID=\$(blkid -s UUID -o value $ROOT_PARTITION)
-echo "Configuring GRUB with UUID: \$ROOT_UUID"
+ROOT_UUID=$(blkid -s UUID -o value $ROOT_PARTITION)
+echo "Configuring GRUB with UUID: $ROOT_UUID"
 
 # Update GRUB default file
-sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=\$ROOT_UUID:main root=/dev/mapper/main\"|" /etc/default/grub
+sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=$ROOT_UUID:main root=/dev/mapper/main\"|" /etc/default/grub
 sed -i 's/^#GRUB_ENABLE_CRYPTODISK=y/GRUB_ENABLE_CRYPTODISK=y/' /etc/default/grub
 
 # Verify GRUB config
@@ -288,16 +298,26 @@ grep "GRUB_CMDLINE_LINUX_DEFAULT" /etc/default/grub
 grep "GRUB_ENABLE_CRYPTODISK" /etc/default/grub
 
 # Generate GRUB config
+echo "Generating GRUB configuration..."
 grub-mkconfig -o /boot/grub/grub.cfg
 
+# Verify the generated config contains our cryptdevice
+if grep -q "cryptdevice=UUID=$ROOT_UUID:main" /boot/grub/grub.cfg; then
+    echo "✓ GRUB config verified: encryption parameters present"
+else
+    echo "⚠ WARNING: GRUB config may be missing encryption parameters"
+    echo "Please verify /boot/grub/grub.cfg manually"
+fi
+
 # Enable services
+echo "Enabling services..."
 systemctl enable NetworkManager sshd firewalld reflector.timer fstrim.timer
 
 # Cleanup and finish
 unset CHROOT_USER_PASSWORD CHROOT_USERNAME CHROOT_HOSTNAME CHROOT_ROOT_PARTITION
 
 echo "System configuration complete!"
-EOF
+CHROOT_SCRIPT
 
 # Make the script executable
 chmod +x /mnt/configure_chroot.sh
@@ -311,9 +331,6 @@ rm /mnt/configure_chroot.sh
 # Cleanup password variables
 unset USER_PASSWORD ENCRYPTION_PASSWORD
 
-# Cleanup any remaining files
-rm -f /tmp/*_pass 2>/dev/null || true
-
 log "✓ Installation completed successfully!"
 
 echo ""
@@ -326,6 +343,9 @@ echo ""
 info "Next steps after reboot:"
 echo "  1. Connect to WiFi: nmcli dev wifi connect SSID --ask" 
 echo "  2. Update system: sudo pacman -Syu"
+echo "  3. Install additional packages as needed"
+echo ""
+warn "When booting, you'll be prompted for your disk encryption password"
 echo ""
 
 echo -n "Reboot now? [Y/n]: "
