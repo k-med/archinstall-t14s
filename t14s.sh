@@ -64,7 +64,7 @@ if [ ! -b "$TARGET_DISK" ]; then
     exit 1
 fi
 
-# Better password function using printf instead of echo
+# Better password function using variables instead of files
 get_secure_password() {
     local prompt="$1"
     local var_name="$2"
@@ -81,10 +81,7 @@ get_secure_password() {
         printf "\n"
         
         if [ "$password1" = "$password2" ] && [ -n "$password1" ]; then
-            # Store in a file temporarily for reliable passing to cryptsetup
-            printf "%s" "$password1" > "/tmp/${var_name,,}_pass"
-            chmod 600 "/tmp/${var_name,,}_pass"
-            eval "$var_name=\"/tmp/${var_name,,}_pass\""
+            eval "$var_name=\"$password1\""
             log "✓ Password set (length: ${#password1})"
             break
         elif [ -z "$password1" ]; then
@@ -95,8 +92,8 @@ get_secure_password() {
     done
 }
 
-get_secure_password "User Password" USER_PASSWORD_FILE
-get_secure_password "Disk Encryption Password" ENCRYPTION_PASSWORD_FILE
+get_secure_password "User Password" USER_PASSWORD
+get_secure_password "Disk Encryption Password" ENCRYPTION_PASSWORD
 
 echo ""
 warn "This will COMPLETELY WIPE $TARGET_DISK!"
@@ -167,18 +164,16 @@ log "Cleaning partition..."
 wipefs -af $ROOT_PARTITION
 dd if=/dev/zero of=$ROOT_PARTITION bs=1M count=10 2>/dev/null
 
-# Encryption with file-based password
+# Encryption with variable instead of file
 log "Setting up LUKS encryption..."
-if ! cryptsetup luksFormat --type luks2 --pbkdf argon2id $ROOT_PARTITION < "$ENCRYPTION_PASSWORD_FILE"; then
+if ! echo "$ENCRYPTION_PASSWORD" | cryptsetup luksFormat --type luks2 --pbkdf argon2id $ROOT_PARTITION; then
     error "Failed to create LUKS encryption"
-    rm -f /tmp/*_pass
     exit 1
 fi
 
 log "Opening encrypted partition..."
-if ! cryptsetup luksOpen $ROOT_PARTITION main < "$ENCRYPTION_PASSWORD_FILE"; then
+if ! echo "$ENCRYPTION_PASSWORD" | cryptsetup luksOpen $ROOT_PARTITION main; then
     error "Failed to open encrypted partition"
-    rm -f /tmp/*_pass
     exit 1
 fi
 
@@ -209,14 +204,22 @@ pacstrap /mnt base linux linux-headers linux-firmware
 # Generate fstab
 genfstab -U -p /mnt >> /mnt/etc/fstab
 
-# Copy password files to chroot
-cp "$USER_PASSWORD_FILE" /mnt/tmp/user_pass
-cp "$ENCRYPTION_PASSWORD_FILE" /mnt/tmp/encrypt_pass
+# Pass passwords to chroot via environment variables
+export CHROOT_USER_PASSWORD="$USER_PASSWORD"
+export CHROOT_USERNAME="$USERNAME"
+export CHROOT_HOSTNAME="$HOSTNAME"
+export CHROOT_ROOT_PARTITION="$ROOT_PARTITION"
 
 # Configure in chroot
 log "Configuring system..."
-arch-chroot /mnt /bin/bash << CHROOT_END
+arch-chroot /mnt /bin/bash << 'CHROOT_END'
 set -e
+
+# Get variables from environment
+USER_PASSWORD="$CHROOT_USER_PASSWORD"
+USERNAME="$CHROOT_USERNAME" 
+HOSTNAME="$CHROOT_HOSTNAME"
+ROOT_PARTITION="$CHROOT_ROOT_PARTITION"
 
 # Timezone
 ln -sf /usr/share/zoneinfo/Australia/Melbourne /etc/localtime
@@ -245,10 +248,16 @@ EOF
 useradd -m -G wheel $USERNAME
 echo "$USERNAME ALL=(ALL) ALL" > /etc/sudoers.d/$USERNAME
 
-# Set passwords from files
-USER_PASS=\$(cat /tmp/user_pass 2>/dev/null || echo "defaultpass")
-echo "root:\$USER_PASS" | chpasswd
-echo "$USERNAME:\$USER_PASS" | chpasswd
+# Set passwords directly using echo
+echo "Setting passwords..."
+echo "root:$USER_PASSWORD" | chpasswd
+echo "$USERNAME:$USER_PASSWORD" | chpasswd
+
+if [ $? -eq 0 ]; then
+    echo "Passwords set successfully"
+else
+    echo "Error setting passwords"
+fi
 
 # Initramfs
 sed -i 's/^MODULES=()/MODULES=(btrfs)/' /etc/mkinitcpio.conf
@@ -277,14 +286,17 @@ grub-mkconfig -o /boot/grub/grub.cfg
 # Enable services
 systemctl enable NetworkManager sshd firewalld reflector.timer fstrim.timer
 
-# Cleanup
-rm -f /tmp/user_pass /tmp/encrypt_pass
+# Cleanup and finish
+unset CHROOT_USER_PASSWORD CHROOT_USERNAME CHROOT_HOSTNAME CHROOT_ROOT_PARTITION
 
 echo "System configuration complete!"
 CHROOT_END
 
-# Cleanup password files
-rm -f /tmp/*_pass
+# Cleanup password variables
+unset USER_PASSWORD ENCRYPTION_PASSWORD
+
+# Cleanup any remaining files
+rm -f /tmp/*_pass 2>/dev/null || true
 
 log "✓ Installation completed successfully!"
 
