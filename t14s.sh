@@ -1,11 +1,10 @@
 #!/bin/bash
 
-# Quick Arch Linux Installation Script for Lenovo T14S Gen 2 AMD
-# Minimal input required - uses sensible defaults
+# Fixed Arch Linux Installation Script
+# Addresses the encryption password and GRUB UUID issues
 
 set -e
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -17,35 +16,32 @@ warn() { echo -e "${YELLOW}[WARNING] $1${NC}"; }
 error() { echo -e "${RED}[ERROR] $1${NC}"; }
 info() { echo -e "${BLUE}[INFO] $1${NC}"; }
 
-# Check root
 if [ "$EUID" -ne 0 ]; then
     error "Run as root: sudo $0"
     exit 1
 fi
 
-# Check UEFI
 if [ ! -d "/sys/firmware/efi" ]; then
     error "UEFI boot required"
     exit 1
 fi
 
-echo -e "${BLUE}==================================${NC}"
-echo -e "${BLUE} Quick Arch Install for T14S AMD${NC}"
-echo -e "${BLUE}==================================${NC}"
+echo -e "${BLUE}================================${NC}"
+echo -e "${BLUE} Fixed Arch Install for T14S${NC}"
+echo -e "${BLUE}================================${NC}"
 
-# Set defaults
+# Defaults
 TARGET_DISK="/dev/nvme0n1"
 HOSTNAME="mercury"
 USERNAME="kdos"
 
-# Show defaults and allow quick override
 echo ""
 info "Default settings:"
 echo "  Target Disk: $TARGET_DISK"
 echo "  Hostname: $HOSTNAME" 
 echo "  Username: $USERNAME"
 echo ""
-echo -n "Use these defaults? [Y/n]: "
+echo -n "Use defaults? [Y/n]: "
 read use_defaults
 
 if [[ "$use_defaults" =~ ^[Nn]$ ]]; then
@@ -62,87 +58,84 @@ if [[ "$use_defaults" =~ ^[Nn]$ ]]; then
     [ -n "$custom_username" ] && USERNAME="$custom_username"
 fi
 
-# Validate disk exists
 if [ ! -b "$TARGET_DISK" ]; then
     error "Disk $TARGET_DISK not found"
     lsblk -d -o NAME,SIZE,MODEL
     exit 1
 fi
 
-# Get passwords with better UI
-get_password() {
+# Better password function using printf instead of echo
+get_secure_password() {
     local prompt="$1"
     local var_name="$2"
-    local attempts=0
+    local password1
+    local password2
     
-    while [ $attempts -lt 3 ]; do
+    while true; do
         echo ""
         echo -e "${BLUE}=== $prompt ===${NC}"
-        echo -n -e "${YELLOW}Password: ${NC}"
-        read -s pass1
-        echo ""
-        echo -n -e "${YELLOW}Confirm:  ${NC}"
-        read -s pass2
-        echo ""
+        printf "${YELLOW}Enter password: ${NC}"
+        read -s password1
+        printf "\n${YELLOW}Confirm password: ${NC}"
+        read -s password2
+        printf "\n"
         
-        if [ "$pass1" = "$pass2" ]; then
-            eval "$var_name=\"$pass1\""
-            log "✓ Password set"
-            return 0
+        if [ "$password1" = "$password2" ] && [ -n "$password1" ]; then
+            # Store in a file temporarily for reliable passing to cryptsetup
+            printf "%s" "$password1" > "/tmp/${var_name,,}_pass"
+            chmod 600 "/tmp/${var_name,,}_pass"
+            eval "$var_name=\"/tmp/${var_name,,}_pass\""
+            log "✓ Password set (length: ${#password1})"
+            break
+        elif [ -z "$password1" ]; then
+            error "Password cannot be empty"
         else
-            error "✗ Passwords don't match"
-            ((attempts++))
+            error "Passwords don't match, try again"
         fi
     done
-    
-    error "Too many failed attempts"
-    exit 1
 }
 
-get_password "User Password" USER_PASSWORD
-get_password "Disk Encryption Password" ENCRYPTION_PASSWORD
+get_secure_password "User Password" USER_PASSWORD_FILE
+get_secure_password "Disk Encryption Password" ENCRYPTION_PASSWORD_FILE
 
-# Final confirmation
 echo ""
 warn "This will COMPLETELY WIPE $TARGET_DISK!"
-echo -n "Continue? Type 'YES' to proceed: "
-read final_confirm
-if [ "$final_confirm" != "YES" ]; then
-    log "Installation cancelled"
+echo -n "Type 'YES' to continue: "
+read confirm
+if [ "$confirm" != "YES" ]; then
+    rm -f /tmp/*_pass
     exit 0
 fi
 
-# Start installation
 log "Starting installation..."
 
-# Clean up any existing setup
-log "Cleaning up previous attempts..."
+# Cleanup
 for mount in $(mount | grep /mnt | awk '{print $3}' | sort -r); do
-    umount "$mount" 2>/dev/null || umount -f "$mount" 2>/dev/null || true
+    umount "$mount" 2>/dev/null || true
 done
-
 [ -e /dev/mapper/main ] && cryptsetup luksClose main 2>/dev/null || true
 
-# Set timezone and update mirrors
-log "Configuring time and mirrors..."
+# Time and mirrors
+log "Setting timezone and updating mirrors..."
 timedatectl set-timezone Australia/Melbourne
 timedatectl set-ntp true
 
-# Update mirrors quickly
 if command -v reflector &> /dev/null; then
     reflector -c Australia -c "New Zealand" -f 10 --sort rate --save /etc/pacman.d/mirrorlist
 fi
 
-# Partition disk
+# Partitioning
 log "Partitioning $TARGET_DISK..."
 sgdisk --zap-all $TARGET_DISK
 sgdisk --clear $TARGET_DISK
 sgdisk --new=1:0:+1G --typecode=1:ef00 $TARGET_DISK
 sgdisk --new=2:0:0 --typecode=2:8300 $TARGET_DISK
+
+# Force partition table reload
 partprobe $TARGET_DISK
 sleep 3
 
-# Set partition variables
+# Set partition names
 if [[ $TARGET_DISK == *"nvme"* ]]; then
     EFI_PARTITION="${TARGET_DISK}p1"
     ROOT_PARTITION="${TARGET_DISK}p2"
@@ -151,86 +144,85 @@ else
     ROOT_PARTITION="${TARGET_DISK}2"
 fi
 
-log "Waiting for partitions to be available..."
-# Wait for partitions to be available
-for i in {1..10}; do
+# Wait for partitions
+log "Waiting for partitions..."
+for i in {1..15}; do
     if [ -b "$ROOT_PARTITION" ] && [ -b "$EFI_PARTITION" ]; then
         break
     fi
-    log "Waiting for partitions... attempt $i/10"
     sleep 1
     partprobe $TARGET_DISK
 done
 
-# Verify partitions exist
 if [ ! -b "$ROOT_PARTITION" ]; then
-    error "Root partition $ROOT_PARTITION not found after partitioning"
-    lsblk $TARGET_DISK
+    error "Partition $ROOT_PARTITION not available"
+    lsblk
     exit 1
 fi
 
-log "Partitions created: $EFI_PARTITION, $ROOT_PARTITION"
+log "Partitions ready: $EFI_PARTITION, $ROOT_PARTITION"
 
-# Wipe partition before encryption
-log "Wiping partition signatures..."
+# Clean partition thoroughly
+log "Cleaning partition..."
 wipefs -af $ROOT_PARTITION
-dd if=/dev/zero of=$ROOT_PARTITION bs=1M count=100 status=none
+dd if=/dev/zero of=$ROOT_PARTITION bs=1M count=10 2>/dev/null
 
-# Encryption
-log "Setting up encryption on $ROOT_PARTITION..."
-log "Creating LUKS header..."
-
-# Debug: Show partition info
-lsblk $TARGET_DISK
-file -s $ROOT_PARTITION
-
-# Create encryption with verbose output
-if ! echo "$ENCRYPTION_PASSWORD" | cryptsetup luksFormat --type luks2 --pbkdf argon2id --verbose $ROOT_PARTITION -; then
+# Encryption with file-based password
+log "Setting up LUKS encryption..."
+if ! cryptsetup luksFormat --type luks2 --pbkdf argon2id $ROOT_PARTITION < "$ENCRYPTION_PASSWORD_FILE"; then
     error "Failed to create LUKS encryption"
+    rm -f /tmp/*_pass
     exit 1
 fi
 
 log "Opening encrypted partition..."
-if ! echo "$ENCRYPTION_PASSWORD" | cryptsetup luksOpen $ROOT_PARTITION main -; then
-    error "Failed to open LUKS partition"
+if ! cryptsetup luksOpen $ROOT_PARTITION main < "$ENCRYPTION_PASSWORD_FILE"; then
+    error "Failed to open encrypted partition"
+    rm -f /tmp/*_pass
     exit 1
 fi
 
-log "Encryption setup completed successfully"
+log "✓ Encryption setup complete"
 
-# Filesystems
-log "Creating filesystems..."
+# Filesystem
+log "Creating BTRFS filesystem..."
 mkfs.fat -F32 $EFI_PARTITION
 mkfs.btrfs -f /dev/mapper/main
 
 # BTRFS subvolumes
-log "Setting up BTRFS subvolumes..."
+log "Creating BTRFS subvolumes..."
 mount /dev/mapper/main /mnt
 btrfs subvolume create /mnt/@
 btrfs subvolume create /mnt/@home
 umount /mnt
 
-# Mount with optimized options
+# Mount with optimization
 mount -o noatime,ssd,compress=zstd,space_cache=v2,discard=async,subvol=@ /dev/mapper/main /mnt
 mkdir -p /mnt/home /mnt/boot
 mount -o noatime,ssd,compress=zstd,space_cache=v2,discard=async,subvol=@home /dev/mapper/main /mnt/home
 mount $EFI_PARTITION /mnt/boot
 
 # Install base system
-log "Installing base system (this may take a few minutes)..."
+log "Installing base system..."
 pacstrap /mnt base linux linux-headers linux-firmware
 
 # Generate fstab
 genfstab -U -p /mnt >> /mnt/etc/fstab
 
-# Configure system
+# Copy password files to chroot
+cp "$USER_PASSWORD_FILE" /mnt/tmp/user_pass
+cp "$ENCRYPTION_PASSWORD_FILE" /mnt/tmp/encrypt_pass
+
+# Configure in chroot
 log "Configuring system..."
 arch-chroot /mnt /bin/bash << CHROOT_END
+set -e
+
 # Timezone
 ln -sf /usr/share/zoneinfo/Australia/Melbourne /etc/localtime
 hwclock --systohc
 
-# Install packages
+# Packages
 pacman -S --noconfirm vim sudo base-devel btrfs-progs grub efibootmgr \
     networkmanager openssh git amd-ucode mesa man-db man-pages \
     firewalld reflector grub-btrfs xf86-video-amdgpu
@@ -243,50 +235,74 @@ echo "KEYMAP=us" > /etc/vconsole.conf
 
 # Network
 echo "$HOSTNAME" > /etc/hostname
-echo "127.0.0.1 localhost" > /etc/hosts
-echo "::1 localhost" >> /etc/hosts
-echo "127.0.1.1 $HOSTNAME.localdomain $HOSTNAME" >> /etc/hosts
+cat > /etc/hosts << EOF
+127.0.0.1 localhost
+::1 localhost
+127.0.1.1 $HOSTNAME.localdomain $HOSTNAME
+EOF
 
-# Users
+# User setup
 useradd -m -G wheel $USERNAME
 echo "$USERNAME ALL=(ALL) ALL" > /etc/sudoers.d/$USERNAME
 
-# Passwords
-echo "root:$USER_PASSWORD" | chpasswd
-echo "$USERNAME:$USER_PASSWORD" | chpasswd
+# Set passwords from files
+chpasswd < <(echo "root:\$(cat /tmp/user_pass)")
+chpasswd < <(echo "$USERNAME:\$(cat /tmp/user_pass)")
 
 # Initramfs
 sed -i 's/^MODULES=()/MODULES=(btrfs)/' /etc/mkinitcpio.conf
 sed -i 's/^HOOKS=(.*)/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -p linux
 
-# GRUB
+# GRUB installation
 grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=grub
+
+# Get UUID and configure GRUB properly
 ROOT_UUID=\$(blkid -s UUID -o value $ROOT_PARTITION)
-sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=\$ROOT_UUID:main root=\/dev\/mapper\/main\"/" /etc/default/grub
+echo "Configuring GRUB with UUID: \$ROOT_UUID"
+
+# Update GRUB default file
+sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=\$ROOT_UUID:main root=/dev/mapper/main\"|" /etc/default/grub
 sed -i 's/^#GRUB_ENABLE_CRYPTODISK=y/GRUB_ENABLE_CRYPTODISK=y/' /etc/default/grub
+
+# Verify GRUB config
+echo "GRUB configuration check:"
+grep "GRUB_CMDLINE_LINUX_DEFAULT" /etc/default/grub
+grep "GRUB_ENABLE_CRYPTODISK" /etc/default/grub
+
+# Generate GRUB config
 grub-mkconfig -o /boot/grub/grub.cfg
 
-# Services
+# Enable services
 systemctl enable NetworkManager sshd firewalld reflector.timer fstrim.timer
+
+# Cleanup
+rm -f /tmp/user_pass /tmp/encrypt_pass
+
+echo "System configuration complete!"
 CHROOT_END
 
+# Cleanup password files
+rm -f /tmp/*_pass
+
 log "✓ Installation completed successfully!"
+
 echo ""
-info "System Information:"
+info "Installation Summary:"
+echo "  Target: $TARGET_DISK"
 echo "  Hostname: $HOSTNAME"
-echo "  User: $USERNAME"
-echo "  Disk: $TARGET_DISK (encrypted BTRFS)"
+echo "  Username: $USERNAME"
+echo "  Encryption: LUKS2 with BTRFS"
 echo ""
-info "After reboot:"
-echo "  1. Connect WiFi: nmcli dev wifi connect SSID --ask"
-echo "  2. Update: sudo pacman -Syu"
+info "Next steps after reboot:"
+echo "  1. Connect to WiFi: nmcli dev wifi connect SSID --ask" 
+echo "  2. Update system: sudo pacman -Syu"
 echo ""
 
 echo -n "Reboot now? [Y/n]: "
 read reboot_now
 if [[ ! "$reboot_now" =~ ^[Nn]$ ]]; then
-    log "Rebooting in 3 seconds..."
-    sleep 3
+    log "Rebooting..."
+    sleep 2
     reboot
 fi
