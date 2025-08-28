@@ -414,7 +414,8 @@ setup_encryption_and_filesystems() {
     
     while [[ $attempt -le $max_attempts ]]; do
         print_status "Creating LUKS encryption (attempt $attempt/$max_attempts)..."
-        if echo -n "$ENCRYPTION_PASSWORD" | cryptsetup luksFormat "$MAIN_PARTITION" --type luks2 --pbkdf pbkdf2 -; then
+        # Use printf instead of echo -n to handle special characters better
+        if printf '%s' "$ENCRYPTION_PASSWORD" | cryptsetup luksFormat "$MAIN_PARTITION" --type luks2 -; then
             print_status "LUKS encryption setup successful"
             break
         else
@@ -427,11 +428,37 @@ setup_encryption_and_filesystems() {
         fi
     done
     
-    # Open encrypted partition
-    if ! echo -n "$ENCRYPTION_PASSWORD" | cryptsetup luksOpen "$MAIN_PARTITION" main -; then
-        print_error "Failed to open encrypted partition"
-        exit 1
-    fi
+    # Wait for the device to be ready
+    sleep 3
+    sync
+    
+    # Open encrypted partition with retry
+    local open_attempts=3
+    local open_attempt=1
+    
+    while [[ $open_attempt -le $open_attempts ]]; do
+        print_status "Opening encrypted partition (attempt $open_attempt/$open_attempts)..."
+        # Use printf instead of echo -n to handle special characters better
+        if printf '%s' "$ENCRYPTION_PASSWORD" | cryptsetup luksOpen "$MAIN_PARTITION" main -; then
+            print_status "Encrypted partition opened successfully"
+            break
+        else
+            print_error "Failed to open encrypted partition (attempt $open_attempt/$open_attempts)"
+            if [[ $open_attempt -eq $open_attempts ]]; then
+                print_error "Could not open encrypted partition after $open_attempts attempts"
+                print_error "Debug: Trying interactive password entry..."
+                # As a last resort, try interactive mode
+                if cryptsetup luksOpen "$MAIN_PARTITION" main; then
+                    print_status "Interactive password entry succeeded"
+                    break
+                else
+                    exit 1
+                fi
+            fi
+            ((open_attempt++))
+            sleep 3
+        fi
+    done
     
     # Verify encrypted device exists
     if [[ ! -b /dev/mapper/main ]]; then
