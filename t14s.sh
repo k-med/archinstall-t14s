@@ -140,7 +140,7 @@ sgdisk --clear $TARGET_DISK
 sgdisk --new=1:0:+1G --typecode=1:ef00 $TARGET_DISK
 sgdisk --new=2:0:0 --typecode=2:8300 $TARGET_DISK
 partprobe $TARGET_DISK
-sleep 2
+sleep 3
 
 # Set partition variables
 if [[ $TARGET_DISK == *"nvme"* ]]; then
@@ -151,10 +151,52 @@ else
     ROOT_PARTITION="${TARGET_DISK}2"
 fi
 
+log "Waiting for partitions to be available..."
+# Wait for partitions to be available
+for i in {1..10}; do
+    if [ -b "$ROOT_PARTITION" ] && [ -b "$EFI_PARTITION" ]; then
+        break
+    fi
+    log "Waiting for partitions... attempt $i/10"
+    sleep 1
+    partprobe $TARGET_DISK
+done
+
+# Verify partitions exist
+if [ ! -b "$ROOT_PARTITION" ]; then
+    error "Root partition $ROOT_PARTITION not found after partitioning"
+    lsblk $TARGET_DISK
+    exit 1
+fi
+
+log "Partitions created: $EFI_PARTITION, $ROOT_PARTITION"
+
+# Wipe partition before encryption
+log "Wiping partition signatures..."
+wipefs -af $ROOT_PARTITION
+dd if=/dev/zero of=$ROOT_PARTITION bs=1M count=100 status=none
+
 # Encryption
-log "Setting up encryption..."
-echo "$ENCRYPTION_PASSWORD" | cryptsetup luksFormat --type luks2 --pbkdf argon2id $ROOT_PARTITION -
-echo "$ENCRYPTION_PASSWORD" | cryptsetup luksOpen $ROOT_PARTITION main -
+log "Setting up encryption on $ROOT_PARTITION..."
+log "Creating LUKS header..."
+
+# Debug: Show partition info
+lsblk $TARGET_DISK
+file -s $ROOT_PARTITION
+
+# Create encryption with verbose output
+if ! echo "$ENCRYPTION_PASSWORD" | cryptsetup luksFormat --type luks2 --pbkdf argon2id --verbose $ROOT_PARTITION -; then
+    error "Failed to create LUKS encryption"
+    exit 1
+fi
+
+log "Opening encrypted partition..."
+if ! echo "$ENCRYPTION_PASSWORD" | cryptsetup luksOpen $ROOT_PARTITION main -; then
+    error "Failed to open LUKS partition"
+    exit 1
+fi
+
+log "Encryption setup completed successfully"
 
 # Filesystems
 log "Creating filesystems..."
