@@ -24,17 +24,34 @@ A tiny repo with two Bash scripts:
 
 ## Quick Start
 
-`# 0) Get the scripts git clone <this-repo-url> arch-hypr-setup cd arch-hypr-setup chmod +x t14s.sh install-hyprland.sh`
+```
+# 0) Get the scripts
+git clone <this-repo-url> arch-hypr-setup
+cd arch-hypr-setup
+chmod +x t14s.sh install-hyprland.sh
+```
 
 ### A) Base system (as **root**, e.g. from the Arch ISO)
 
-`sudo ./t14s.sh # Accept defaults or customize: disk, hostname, username. # This creates LUKS2 on the root partition, Btrfs @/@home, installs base+grub, # and enables NetworkManager, sshd, firewalld, reflector, fstrim.`
+```
+sudo ./t14s.sh
+# Accept defaults or customize: disk, hostname, username.
+# This creates LUKS2 on the root partition, Btrfs @/@home, installs base+grub,
+# and enables NetworkManager, sshd, firewalld, reflector, fstrim.
+
+```
 
 Reboot into your new system and log in as the user you created.
 
 ### B) Desktop (as **normal user**, not root)
 
-`./install-hyprland.sh # Installs Hyprland stack, waybar/wofi/swaync, pipewire, fonts/themes, # oh-my-zsh + starship, clones dotfiles & wallpapers, stows configs, # creates a default Hyprland config if dotfiles don’t provide one.`
+```
+./install-hyprland.sh
+# Installs Hyprland stack, waybar/wofi/swaync, pipewire, fonts/themes,
+# oh-my-zsh + starship, clones dotfiles & wallpapers, stows configs,
+# creates a default Hyprland config if dotfiles don’t provide one.
+
+```
 
 When it finishes:
 
