@@ -129,7 +129,7 @@ Now install the desktop environment:
 cd ~                                    # Go to home directory
 
 # If you need to download the script again:
-curl -LO https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/install-hyprland.sh
+curl -LO https://raw.githubusercontent.com/k-med/archinstall-t14s/main/install-hyprland.sh
 chmod +x install-hyprland.sh
 
 # 2. Run the Hyprland installer (do NOT use sudo!)
