@@ -76,12 +76,12 @@ exit                                     # Exit iwctl
 ping -c 3 archlinux.org                 # Should see replies
 
 # 3. Download the installation scripts
-curl -LO https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/t14s.sh
-curl -LO https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/install-hyprland.sh
+curl -LO https://raw.githubusercontent.com/k-med/archinstall-t14s/main/t14s.sh
+curl -LO https://raw.githubusercontent.com/k-med/archinstall-t14s/main/install-hyprland.sh
 
 # OR clone the repository
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
-cd YOUR_REPO
+git clone https://github.com/k-med/archinstall-t14s.git
+cd k-med
 
 # 4. Make scripts executable
 chmod +x t14s.sh install-hyprland.sh
